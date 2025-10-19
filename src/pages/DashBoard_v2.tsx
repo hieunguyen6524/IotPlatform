@@ -13,6 +13,7 @@ import {
   Check,
   Settings,
   TrendingUp,
+  Filter,
 } from "lucide-react";
 import {
   LineChart,
@@ -260,6 +261,18 @@ export default function Dashboard() {
   const [tab, setTab] = useState<
     "overview" | "devices" | "alerts" | "events" | "settings"
   >("overview");
+
+  // Alerts Filter States
+  const [alertFilterDevice, setAlertFilterDevice] = useState<string>("");
+  const [alertStartTime, setAlertStartTime] = useState<string>("");
+  const [alertEndTime, setAlertEndTime] = useState<string>("");
+
+  // Events Filter States
+  const [eventFilterDevice, setEventFilterDevice] = useState<string>("all");
+  const [eventStartDate, setEventStartDate] = useState<string>("");
+  const [eventEndDate, setEventEndDate] = useState<string>("");
+
+  // Device States
   const [showAddDevice, setShowAddDevice] = useState(false);
   const [showEditDevice, setShowEditDevice] = useState(false);
   const [editingDevice, setEditingDevice] = useState<Device | null>(null);
@@ -269,6 +282,17 @@ export default function Dashboard() {
     location: "",
     type: "TemperatureSensor",
     status: "Active",
+  });
+
+  // Threshold States
+  const [showAddThreshold, setShowAddThreshold] = useState(false);
+  const [showEditThreshold, setShowEditThreshold] = useState(false);
+  const [editingThreshold, setEditingThreshold] =
+    useState<SensorThreshold | null>(null);
+  const [newThreshold, setNewThreshold] = useState({
+    sensorType: "",
+    minValue: 0,
+    maxValue: 100,
   });
 
   // SSE Refs
@@ -291,11 +315,30 @@ export default function Dashboard() {
   useEffect(() => {
     if (isAuthenticated && user) {
       fetchDevices();
-      fetchRecentAlerts();
-      fetchRecentEvents();
       fetchThresholds();
     }
   }, [isAuthenticated, user]);
+
+  // Initialize alerts and events when devices are loaded
+  useEffect(() => {
+    if (devices.length > 0) {
+      // Set first device as default for alerts
+      setAlertFilterDevice(devices[0].deviceId);
+      // Initialize alerts with 8 hours default
+      const now = new Date();
+      const eightHoursAgo = new Date(now.getTime() - 8 * 60 * 60 * 1000);
+      setAlertStartTime(eightHoursAgo.toISOString().slice(0, 16));
+      setAlertEndTime(now.toISOString().slice(0, 16));
+      fetchFilteredAlerts(
+        devices[0].deviceId,
+        eightHoursAgo.toISOString(),
+        now.toISOString()
+      );
+
+      // Initialize events (all devices, 7 days)
+      fetchFilteredEvents("all", null, null);
+    }
+  }, [devices]);
 
   // Setup SSE connections
   useEffect(() => {
@@ -347,7 +390,7 @@ export default function Dashboard() {
     eventSource.onmessage = (event) => {
       try {
         const alert = JSON.parse(event.data);
-        setAlerts((prev) => [alert, ...prev].slice(0, 50));
+        setAlerts((prev) => [alert, ...prev].slice(0, 100));
       } catch (err) {
         console.error("Failed to parse alert SSE:", err);
       }
@@ -376,7 +419,7 @@ export default function Dashboard() {
     eventSource.onmessage = (event) => {
       try {
         const deviceEvent = JSON.parse(event.data);
-        setDeviceEvents((prev) => [deviceEvent, ...prev].slice(0, 50));
+        setDeviceEvents((prev) => [deviceEvent, ...prev].slice(0, 100));
       } catch (err) {
         console.error("Failed to parse event SSE:", err);
       }
@@ -491,10 +534,15 @@ export default function Dashboard() {
     }
   };
 
-  const fetchRecentAlerts = async () => {
+  const fetchFilteredAlerts = async (
+    deviceId: string,
+    start: string,
+    end: string
+  ) => {
     try {
-      // Alerts chỉ lấy 8 giờ gần nhất
-      const res = await axiosInstance.get("/alerts");
+      const res = await axiosInstance.get(
+        `/alerts/${deviceId}?start=${start}&end=${end}`
+      );
       setAlerts(res.data || []);
     } catch (err) {
       console.error("Failed to fetch alerts:", err);
@@ -502,15 +550,25 @@ export default function Dashboard() {
     }
   };
 
-  const fetchRecentEvents = async () => {
+  const fetchFilteredEvents = async (
+    deviceId: string,
+    start: string | null,
+    end: string | null
+  ) => {
     try {
-      // Events có thể lấy trong 31 ngày
-      const end = new Date();
-      const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 ngày trước
+      let url =
+        deviceId === "all" ? "/device-events" : `/device-events/${deviceId}`;
 
-      const res = await axiosInstance.get(
-        `/device-events?start=${start.toISOString()}&end=${end.toISOString()}`
-      );
+      if (!start || !end) {
+        // Default: last 7 days
+        const now = new Date();
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        url += `?start=${sevenDaysAgo.toISOString()}&end=${now.toISOString()}`;
+      } else {
+        url += `?start=${start}&end=${end}`;
+      }
+
+      const res = await axiosInstance.get(url);
       setDeviceEvents(res.data || []);
     } catch (err) {
       console.error("Failed to fetch events:", err);
@@ -683,6 +741,173 @@ export default function Dashboard() {
     }
   };
 
+  // Threshold CRUD
+  const handleAddThreshold = async () => {
+    if (!newThreshold.sensorType) {
+      alert("Please enter sensor type");
+      return;
+    }
+    if (newThreshold.minValue >= newThreshold.maxValue) {
+      alert("Min value must be less than max value!");
+      return;
+    }
+
+    try {
+      const response = await axiosInstance.post(
+        "/sensor-thresholds",
+        newThreshold
+      );
+      if (response.status === 204) {
+        fetchThresholds();
+        setNewThreshold({ sensorType: "", minValue: 0, maxValue: 100 });
+        setShowAddThreshold(false);
+        alert("Threshold added successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 409) {
+          alert("Threshold for this sensor type already exists!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else if (status === 400) {
+          alert("Invalid threshold values!");
+        } else {
+          alert("Failed to add threshold!");
+        }
+      }
+    }
+  };
+
+  const handleUpdateThreshold = async () => {
+    if (!editingThreshold) return;
+    if (editingThreshold.minValue >= editingThreshold.maxValue) {
+      alert("Min value must be less than max value!");
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("minValue", editingThreshold.minValue.toString());
+      formData.append("maxValue", editingThreshold.maxValue.toString());
+
+      const response = await axiosInstance.patch(
+        `/sensor-thresholds/${editingThreshold.sensorType}`,
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+
+      if (response.status === 204) {
+        fetchThresholds();
+        setShowEditThreshold(false);
+        setEditingThreshold(null);
+        alert("Threshold updated successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Threshold not found!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else {
+          alert("Failed to update threshold!");
+        }
+      }
+    }
+  };
+
+  const handleDeleteThreshold = async (sensorType: string) => {
+    if (!confirm("Are you sure you want to delete this threshold?")) return;
+
+    try {
+      const response = await axiosInstance.delete(
+        `/sensor-thresholds/${sensorType}`
+      );
+      if (response.status === 204) {
+        fetchThresholds();
+        alert("Threshold deleted successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Threshold not found!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else {
+          alert("Failed to delete threshold!");
+        }
+      }
+    }
+  };
+
+  const handleAlertFilter = () => {
+    if (!alertStartTime || !alertEndTime) {
+      alert("Please select both start and end time");
+      return;
+    }
+
+    const start = new Date(alertStartTime);
+    const end = new Date(alertEndTime);
+    const now = new Date();
+    const eightHoursAgo = new Date(now.getTime() - 8 * 60 * 60 * 1000);
+
+    if (start < eightHoursAgo) {
+      alert("Start time cannot be more than 8 hours ago!");
+      return;
+    }
+
+    if (end > now) {
+      alert("End time cannot be in the future!");
+      return;
+    }
+
+    if (start >= end) {
+      alert("Start time must be before end time!");
+      return;
+    }
+
+    fetchFilteredAlerts(
+      alertFilterDevice,
+      start.toISOString(),
+      end.toISOString()
+    );
+  };
+
+  const handleEventFilter = () => {
+    if (!eventStartDate || !eventEndDate) {
+      alert("Please select both start and end date");
+      return;
+    }
+
+    const start = new Date(eventStartDate);
+    const end = new Date(eventEndDate);
+    const now = new Date();
+    const thirtyOneDaysAgo = new Date(now.getTime() - 31 * 24 * 60 * 60 * 1000);
+
+    if (start < thirtyOneDaysAgo) {
+      alert("Start date cannot be more than 31 days ago!");
+      return;
+    }
+
+    if (end > now) {
+      alert("End date cannot be in the future!");
+      return;
+    }
+
+    if (start >= end) {
+      alert("Start date must be before end date!");
+      return;
+    }
+
+    fetchFilteredEvents(
+      eventFilterDevice,
+      start.toISOString(),
+      end.toISOString()
+    );
+  };
+
   const isEditor = user?.role === "Editor" || user?.role === "Admin";
 
   const chartData = sensorHistory.slice(-24).map((s) => ({
@@ -853,7 +1078,7 @@ export default function Dashboard() {
 
             {selectedDeviceId && selectedSensorType && (
               <>
-                {/* Stats */}
+                {/* Stats - Always show */}
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                   <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
                     <p className="text-slate-400 text-sm font-medium">
@@ -863,10 +1088,11 @@ export default function Dashboard() {
                       {currentLatestData?.value.toFixed(1) || "N/A"}
                     </p>
                     <p className="text-xs text-slate-500 mt-1">
-                      {currentLatestData &&
-                        new Date(
-                          currentLatestData.timestamp
-                        ).toLocaleTimeString()}
+                      {currentLatestData
+                        ? new Date(
+                            currentLatestData.timestamp
+                          ).toLocaleTimeString()
+                        : "No data"}
                     </p>
                   </div>
                   <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
@@ -908,7 +1134,7 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Predicted Value */}
+                {/* Predicted Value - Always show if available */}
                 {currentAnalytics?.predictedValue && (
                   <div className="bg-gradient-to-r from-purple-900/20 to-blue-900/20 p-6 rounded-lg border border-purple-700">
                     <div className="flex items-center gap-3">
@@ -925,62 +1151,7 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {/* Charts */}
-                {/* {chartData.length > 0 && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
-                      <h3 className="text-xl font-bold text-white mb-4">
-                        Sensor Trend - {selectedSensorType}
-                      </h3>
-                      <ResponsiveContainer width="100%" height={300}>
-                        <LineChart data={chartData}>
-                          <CartesianGrid
-                            strokeDasharray="3 3"
-                            stroke="#475569"
-                          />
-                          <XAxis dataKey="time" stroke="#94a3b8" />
-                          <YAxis stroke="#94a3b8" />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: "#1e293b",
-                              border: "1px solid #475569",
-                            }}
-                          />
-                          <Line
-                            type="monotone"
-                            dataKey="value"
-                            stroke="#3b82f6"
-                            strokeWidth={2}
-                          />
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </div>
-
-                    <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
-                      <h3 className="text-xl font-bold text-white mb-4">
-                        Sensor Distribution
-                      </h3>
-                      <ResponsiveContainer width="100%" height={300}>
-                        <BarChart data={chartData}>
-                          <CartesianGrid
-                            strokeDasharray="3 3"
-                            stroke="#475569"
-                          />
-                          <XAxis dataKey="time" stroke="#94a3b8" />
-                          <YAxis stroke="#94a3b8" />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: "#1e293b",
-                              border: "1px solid #475569",
-                            }}
-                          />
-                          <Bar dataKey="value" fill="#10b981" />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-                )} */}
-
+                {/* Charts - Always show */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
                     <h3 className="text-xl font-bold text-white mb-4">
@@ -1050,12 +1221,12 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Today's Analytics Table */}
-                {currentAnalytics && (
-                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
-                    <h3 className="text-xl font-bold text-white mb-4">
-                      Today's Analytics - {selectedSensorType}
-                    </h3>
+                {/* Today's Analytics Table - Always show */}
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                  <h3 className="text-xl font-bold text-white mb-4">
+                    Today's Analytics - {selectedSensorType}
+                  </h3>
+                  {currentAnalytics ? (
                     <div className="overflow-x-auto">
                       <table className="w-full text-left">
                         <thead className="bg-slate-700">
@@ -1120,8 +1291,12 @@ export default function Dashboard() {
                         </tbody>
                       </table>
                     </div>
-                  </div>
-                )}
+                  ) : (
+                    <p className="text-center text-slate-400 py-8">
+                      No analytics data available for today
+                    </p>
+                  )}
+                </div>
               </>
             )}
 
@@ -1396,10 +1571,60 @@ export default function Dashboard() {
         {/* Alerts Tab */}
         {tab === "alerts" && (
           <div className="space-y-6">
-            <div className="bg-blue-900/20 border border-blue-700 p-4 rounded-lg">
-              <p className="text-blue-300 text-sm">
-                📌 Showing alerts from the last 8 hours (real-time updates via
-                SSE)
+            {/* Filters */}
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <div className="flex items-center gap-2 mb-4">
+                <Filter className="w-5 h-5 text-blue-400" />
+                <h3 className="text-lg font-bold text-white">Filter Alerts</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-slate-300 mb-2">Device</label>
+                  <select
+                    value={alertFilterDevice}
+                    onChange={(e) => setAlertFilterDevice(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  >
+                    {devices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">
+                    Start Time
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={alertStartTime}
+                    onChange={(e) => setAlertStartTime(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">
+                    End Time (Now)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={alertEndTime}
+                    onChange={(e) => setAlertEndTime(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={handleAlertFilter}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded transition"
+                  >
+                    Apply Filter
+                  </button>
+                </div>
+              </div>
+              <p className="text-slate-400 text-sm mt-3">
+                📌 Maximum range: 8 hours from now
               </p>
             </div>
 
@@ -1407,7 +1632,7 @@ export default function Dashboard() {
               {alerts.length === 0 ? (
                 <div className="text-center py-12 text-slate-400 bg-slate-800 rounded-lg border border-slate-700">
                   <AlertCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                  <p>No alerts at the moment</p>
+                  <p>No alerts for the selected period</p>
                 </div>
               ) : (
                 alerts.map((alert, idx) => (
@@ -1472,10 +1697,59 @@ export default function Dashboard() {
         {/* Events Tab */}
         {tab === "events" && (
           <div className="space-y-6">
-            <div className="bg-blue-900/20 border border-blue-700 p-4 rounded-lg">
-              <p className="text-blue-300 text-sm">
-                📌 Showing device events from the last 7 days (real-time updates
-                via SSE)
+            {/* Filters */}
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <div className="flex items-center gap-2 mb-4">
+                <Filter className="w-5 h-5 text-blue-400" />
+                <h3 className="text-lg font-bold text-white">Filter Events</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-slate-300 mb-2">Device</label>
+                  <select
+                    value={eventFilterDevice}
+                    onChange={(e) => setEventFilterDevice(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="all">All Devices</option>
+                    {devices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">
+                    Start Date
+                  </label>
+                  <input
+                    type="date"
+                    value={eventStartDate}
+                    onChange={(e) => setEventStartDate(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">End Date</label>
+                  <input
+                    type="date"
+                    value={eventEndDate}
+                    onChange={(e) => setEventEndDate(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={handleEventFilter}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded transition"
+                  >
+                    Apply Filter
+                  </button>
+                </div>
+              </div>
+              <p className="text-slate-400 text-sm mt-3">
+                📌 Maximum range: 31 days ago to now
               </p>
             </div>
 
@@ -1518,9 +1792,81 @@ export default function Dashboard() {
         {tab === "settings" && isEditor && (
           <div className="space-y-6">
             <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
-              <h3 className="text-xl font-bold text-white mb-4">
-                Sensor Thresholds
-              </h3>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-white">
+                  Sensor Thresholds
+                </h3>
+                <button
+                  onClick={() => setShowAddThreshold(!showAddThreshold)}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
+                >
+                  <Plus className="w-5 h-5" />
+                  Add Threshold
+                </button>
+              </div>
+
+              {showAddThreshold && (
+                <div className="mb-6 p-4 bg-slate-700/50 rounded-lg border border-slate-600">
+                  <h4 className="text-white font-medium mb-3">New Threshold</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <input
+                      type="text"
+                      placeholder="Sensor Type"
+                      value={newThreshold.sensorType}
+                      onChange={(e) =>
+                        setNewThreshold({
+                          ...newThreshold,
+                          sensorType: e.target.value,
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="Min Value"
+                      value={newThreshold.minValue}
+                      onChange={(e) =>
+                        setNewThreshold({
+                          ...newThreshold,
+                          minValue: parseFloat(e.target.value),
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="Max Value"
+                      value={newThreshold.maxValue}
+                      onChange={(e) =>
+                        setNewThreshold({
+                          ...newThreshold,
+                          maxValue: parseFloat(e.target.value),
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={handleAddThreshold}
+                      className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Add
+                    </button>
+                    <button
+                      onClick={() => setShowAddThreshold(false)}
+                      className="bg-slate-600 hover:bg-slate-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                    >
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-4">
                 {thresholds.length === 0 ? (
                   <p className="text-slate-400 text-center py-8">
@@ -1540,6 +1886,7 @@ export default function Dashboard() {
                           <th className="px-4 py-3 text-slate-300">
                             Max Value
                           </th>
+                          <th className="px-4 py-3 text-slate-300">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-700">
@@ -1554,6 +1901,29 @@ export default function Dashboard() {
                             <td className="px-4 py-3 text-slate-300">
                               {threshold.maxValue}
                             </td>
+                            <td className="px-4 py-3">
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => {
+                                    setEditingThreshold(threshold);
+                                    setShowEditThreshold(true);
+                                  }}
+                                  className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 px-3 py-1 rounded text-sm transition flex items-center gap-1"
+                                >
+                                  <Edit2 className="w-3 h-3" />
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleDeleteThreshold(threshold.sensorType)
+                                  }
+                                  className="bg-red-600/20 hover:bg-red-600/40 text-red-300 px-3 py-1 rounded text-sm transition flex items-center gap-1"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1562,6 +1932,83 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
+
+            {/* Edit Threshold Modal */}
+            {showEditThreshold && editingThreshold && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700 max-w-md w-full">
+                  <h3 className="text-lg font-bold text-white mb-4">
+                    Edit Threshold
+                  </h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Sensor Type
+                      </label>
+                      <input
+                        type="text"
+                        value={editingThreshold.sensorType}
+                        disabled
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-slate-500 cursor-not-allowed"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Min Value
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editingThreshold.minValue}
+                        onChange={(e) =>
+                          setEditingThreshold({
+                            ...editingThreshold,
+                            minValue: parseFloat(e.target.value),
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Max Value
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editingThreshold.maxValue}
+                        onChange={(e) =>
+                          setEditingThreshold({
+                            ...editingThreshold,
+                            maxValue: parseFloat(e.target.value),
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-6">
+                    <button
+                      onClick={handleUpdateThreshold}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Update
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowEditThreshold(false);
+                        setEditingThreshold(null);
+                      }}
+                      className="flex-1 bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
