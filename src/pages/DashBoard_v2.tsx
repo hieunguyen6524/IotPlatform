@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Plus,
   Trash2,
@@ -11,6 +11,8 @@ import {
   WifiOff,
   X,
   Check,
+  Settings,
+  TrendingUp,
 } from "lucide-react";
 import {
   LineChart,
@@ -26,7 +28,8 @@ import {
 import axios from "axios";
 
 // Axios Configuration
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "https://example.com/api";
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL || "http://192.168.137.1:5000/api";
 
 const axiosInstance = axios.create({
   baseURL: API_BASE,
@@ -36,7 +39,7 @@ const axiosInstance = axios.create({
   },
 });
 
-// Request Interceptor - Thêm token vào mọi request
+// Request Interceptor
 axiosInstance.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("accessToken");
@@ -48,7 +51,7 @@ axiosInstance.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response Interceptor - Xử lý refresh token khi 401
+// Response Interceptor
 axiosInstance.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -131,6 +134,19 @@ interface User {
   username: string;
   displayName: string;
   role: string;
+}
+
+interface SensorThreshold {
+  sensorType: string;
+  minValue: number;
+  maxValue: number;
+}
+
+interface DeviceEvent {
+  deviceId: string;
+  eventTime: string;
+  description: string;
+  eventType: string;
 }
 
 // Login Component
@@ -237,11 +253,13 @@ export default function Dashboard() {
   const [sensorTypes, setSensorTypes] = useState<string[]>([]);
   const [latestData, setLatestData] = useState<SensorData[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [filteredAlerts, setFilteredAlerts] = useState<Alert[]>([]);
-  const [alertFilterDevice, setAlertFilterDevice] = useState<string>("all");
+  const [deviceEvents, setDeviceEvents] = useState<DeviceEvent[]>([]);
   const [analytics, setAnalytics] = useState<Analytics[]>([]);
   const [sensorHistory, setSensorHistory] = useState<SensorData[]>([]);
-  const [tab, setTab] = useState<"overview" | "devices" | "alerts">("overview");
+  const [thresholds, setThresholds] = useState<SensorThreshold[]>([]);
+  const [tab, setTab] = useState<
+    "overview" | "devices" | "alerts" | "events" | "settings"
+  >("overview");
   const [showAddDevice, setShowAddDevice] = useState(false);
   const [showEditDevice, setShowEditDevice] = useState(false);
   const [editingDevice, setEditingDevice] = useState<Device | null>(null);
@@ -253,7 +271,12 @@ export default function Dashboard() {
     status: "Active",
   });
 
-  // Khởi tạo - Kiểm tra authentication
+  // SSE Refs
+  const alertsSSERef = useRef<EventSource | null>(null);
+  const sensorSSERef = useRef<EventSource | null>(null);
+  const eventsSSERef = useRef<EventSource | null>(null);
+
+  // Initialize
   useEffect(() => {
     const auth = localStorage.getItem("isAuthenticated");
     const token = localStorage.getItem("accessToken");
@@ -264,29 +287,44 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Fetch data sau khi đã có user profile
+  // Fetch data after authentication
   useEffect(() => {
     if (isAuthenticated && user) {
       fetchDevices();
-      fetchAlerts();
-
-      const interval = setInterval(() => {
-        if (selectedDeviceId) fetchLatestData();
-        fetchAlerts();
-      }, 5000);
-
-      return () => clearInterval(interval);
+      fetchRecentAlerts();
+      fetchRecentEvents();
+      fetchThresholds();
     }
-  }, [isAuthenticated, user, selectedDeviceId]);
+  }, [isAuthenticated, user]);
 
-  // Fetch latest data khi chọn device
+  // Setup SSE connections
   useEffect(() => {
-    if (selectedDeviceId) {
+    if (isAuthenticated && user) {
+      setupAlertsSSE();
+      setupEventsSSE();
+
+      return () => {
+        closeSSEConnections();
+      };
+    }
+  }, [isAuthenticated, user]);
+
+  // Setup sensor SSE when device selected
+  useEffect(() => {
+    if (selectedDeviceId && isAuthenticated) {
+      setupSensorSSE();
       fetchLatestData();
     }
-  }, [selectedDeviceId]);
 
-  // Fetch analytics và history khi chọn sensor type
+    return () => {
+      if (sensorSSERef.current) {
+        sensorSSERef.current.close();
+        sensorSSERef.current = null;
+      }
+    };
+  }, [selectedDeviceId, isAuthenticated]);
+
+  // Fetch analytics and history
   useEffect(() => {
     if (selectedDeviceId && selectedSensorType) {
       fetchAnalytics();
@@ -294,14 +332,119 @@ export default function Dashboard() {
     }
   }, [selectedDeviceId, selectedSensorType]);
 
-  // Filter alerts
-  useEffect(() => {
-    if (alertFilterDevice === "all") {
-      setFilteredAlerts(alerts);
-    } else {
-      setFilteredAlerts(alerts.filter((a) => a.deviceId === alertFilterDevice));
+  const setupAlertsSSE = () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    if (alertsSSERef.current) {
+      alertsSSERef.current.close();
     }
-  }, [alerts, alertFilterDevice]);
+
+    const eventSource = new EventSource(`${API_BASE}/alerts/sse`, {
+      withCredentials: true,
+    });
+
+    eventSource.onmessage = (event) => {
+      try {
+        const alert = JSON.parse(event.data);
+        setAlerts((prev) => [alert, ...prev].slice(0, 50));
+      } catch (err) {
+        console.error("Failed to parse alert SSE:", err);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("Alerts SSE error:", error);
+      eventSource.close();
+    };
+
+    alertsSSERef.current = eventSource;
+  };
+
+  const setupEventsSSE = () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    if (eventsSSERef.current) {
+      eventsSSERef.current.close();
+    }
+
+    const eventSource = new EventSource(`${API_BASE}/device-events/sse`, {
+      withCredentials: true,
+    });
+
+    eventSource.onmessage = (event) => {
+      try {
+        const deviceEvent = JSON.parse(event.data);
+        setDeviceEvents((prev) => [deviceEvent, ...prev].slice(0, 50));
+      } catch (err) {
+        console.error("Failed to parse event SSE:", err);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("Events SSE error:", error);
+      eventSource.close();
+    };
+
+    eventsSSERef.current = eventSource;
+  };
+
+  const setupSensorSSE = () => {
+    if (!selectedDeviceId) return;
+
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    if (sensorSSERef.current) {
+      sensorSSERef.current.close();
+    }
+
+    const eventSource = new EventSource(
+      `${API_BASE}/sensor-data/${selectedDeviceId}/sse`,
+      { withCredentials: true }
+    );
+
+    eventSource.onmessage = (event) => {
+      try {
+        const sensorData = JSON.parse(event.data);
+        setLatestData((prev) => {
+          const filtered = prev.filter(
+            (d) => d.sensorType !== sensorData.sensorType
+          );
+          return [...filtered, sensorData];
+        });
+
+        if (sensorData.sensorType === selectedSensorType) {
+          setSensorHistory((prev) => [...prev, sensorData].slice(-100));
+        }
+      } catch (err) {
+        console.error("Failed to parse sensor SSE:", err);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("Sensor SSE error:", error);
+      eventSource.close();
+    };
+
+    sensorSSERef.current = eventSource;
+  };
+
+  const closeSSEConnections = () => {
+    if (alertsSSERef.current) {
+      alertsSSERef.current.close();
+      alertsSSERef.current = null;
+    }
+    if (sensorSSERef.current) {
+      sensorSSERef.current.close();
+      sensorSSERef.current = null;
+    }
+    if (eventsSSERef.current) {
+      eventsSSERef.current.close();
+      eventsSSERef.current = null;
+    }
+  };
 
   const fetchUserProfile = async () => {
     try {
@@ -348,12 +491,30 @@ export default function Dashboard() {
     }
   };
 
-  const fetchAlerts = async () => {
+  const fetchRecentAlerts = async () => {
     try {
+      // Alerts chỉ lấy 8 giờ gần nhất
       const res = await axiosInstance.get("/alerts");
-      setAlerts(res.data);
+      setAlerts(res.data || []);
     } catch (err) {
       console.error("Failed to fetch alerts:", err);
+      setAlerts([]);
+    }
+  };
+
+  const fetchRecentEvents = async () => {
+    try {
+      // Events có thể lấy trong 31 ngày
+      const end = new Date();
+      const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 ngày trước
+
+      const res = await axiosInstance.get(
+        `/device-events?start=${start.toISOString()}&end=${end.toISOString()}`
+      );
+      setDeviceEvents(res.data || []);
+    } catch (err) {
+      console.error("Failed to fetch events:", err);
+      setDeviceEvents([]);
     }
   };
 
@@ -389,6 +550,15 @@ export default function Dashboard() {
     }
   };
 
+  const fetchThresholds = async () => {
+    try {
+      const res = await axiosInstance.get("/sensor-thresholds");
+      setThresholds(res.data || []);
+    } catch (err) {
+      console.error("Failed to fetch thresholds:", err);
+    }
+  };
+
   const handleLoginSuccess = async () => {
     setIsAuthenticated(true);
     await fetchUserProfile();
@@ -400,6 +570,7 @@ export default function Dashboard() {
     } catch (err) {
       console.error("Logout error:", err);
     } finally {
+      closeSSEConnections();
       localStorage.clear();
       setIsAuthenticated(false);
       setUser(null);
@@ -493,6 +664,9 @@ export default function Dashboard() {
       const response = await axiosInstance.delete(`/devices/${deviceId}`);
       if (response.status === 204) {
         fetchDevices();
+        if (selectedDeviceId === deviceId) {
+          setSelectedDeviceId("");
+        }
         alert("Device deleted successfully!");
       }
     } catch (err) {
@@ -525,6 +699,9 @@ export default function Dashboard() {
   const currentLatestData = latestData.find(
     (d) => d.sensorType === selectedSensorType
   );
+  const currentThreshold = thresholds.find(
+    (t) => t.sensorType === selectedSensorType
+  );
 
   if (!isAuthenticated) {
     return <LoginPage onLogin={handleLoginSuccess} />;
@@ -542,7 +719,7 @@ export default function Dashboard() {
                 IoT Dashboard
               </h1>
               <p className="text-slate-400 mt-1">
-                Quản lý thiết bị và cảm biến
+                Real-time Device & Sensor Management
               </p>
             </div>
             <div className="flex items-center gap-4">
@@ -568,7 +745,7 @@ export default function Dashboard() {
               className={`px-4 py-2 rounded transition ${
                 tab === "overview"
                   ? "bg-blue-600 text-white"
-                  : "bg-slate-700 text-slate-300"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
               }`}
             >
               Overview
@@ -578,7 +755,7 @@ export default function Dashboard() {
               className={`px-4 py-2 rounded transition ${
                 tab === "devices"
                   ? "bg-blue-600 text-white"
-                  : "bg-slate-700 text-slate-300"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
               }`}
             >
               Devices
@@ -588,11 +765,39 @@ export default function Dashboard() {
               className={`px-4 py-2 rounded transition ${
                 tab === "alerts"
                   ? "bg-blue-600 text-white"
-                  : "bg-slate-700 text-slate-300"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
               }`}
             >
               Alerts
+              {alerts.length > 0 && (
+                <span className="ml-2 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full">
+                  {alerts.length}
+                </span>
+              )}
             </button>
+            <button
+              onClick={() => setTab("events")}
+              className={`px-4 py-2 rounded transition ${
+                tab === "events"
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+            >
+              Events
+            </button>
+            {isEditor && (
+              <button
+                onClick={() => setTab("settings")}
+                className={`px-4 py-2 rounded transition ${
+                  tab === "settings"
+                    ? "bg-blue-600 text-white"
+                    : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                }`}
+              >
+                <Settings className="w-4 h-4 inline mr-1" />
+                Settings
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -657,6 +862,12 @@ export default function Dashboard() {
                     <p className="text-3xl font-bold text-white mt-2">
                       {currentLatestData?.value.toFixed(1) || "N/A"}
                     </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {currentLatestData &&
+                        new Date(
+                          currentLatestData.timestamp
+                        ).toLocaleTimeString()}
+                    </p>
                   </div>
                   <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
                     <p className="text-slate-400 text-sm font-medium">
@@ -664,6 +875,9 @@ export default function Dashboard() {
                     </p>
                     <p className="text-3xl font-bold text-green-400 mt-2">
                       {currentAnalytics?.avgValue.toFixed(1) || "N/A"}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Today's average
                     </p>
                   </div>
                   <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
@@ -673,6 +887,11 @@ export default function Dashboard() {
                     <p className="text-3xl font-bold text-red-400 mt-2">
                       {currentAnalytics?.maxValue.toFixed(1) || "N/A"}
                     </p>
+                    {currentThreshold && (
+                      <p className="text-xs text-slate-500 mt-1">
+                        Threshold: {currentThreshold.maxValue}
+                      </p>
+                    )}
                   </div>
                   <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
                     <p className="text-slate-400 text-sm font-medium">
@@ -681,11 +900,33 @@ export default function Dashboard() {
                     <p className="text-3xl font-bold text-blue-400 mt-2">
                       {currentAnalytics?.minValue.toFixed(1) || "N/A"}
                     </p>
+                    {currentThreshold && (
+                      <p className="text-xs text-slate-500 mt-1">
+                        Threshold: {currentThreshold.minValue}
+                      </p>
+                    )}
                   </div>
                 </div>
 
+                {/* Predicted Value */}
+                {currentAnalytics?.predictedValue && (
+                  <div className="bg-gradient-to-r from-purple-900/20 to-blue-900/20 p-6 rounded-lg border border-purple-700">
+                    <div className="flex items-center gap-3">
+                      <TrendingUp className="w-8 h-8 text-purple-400" />
+                      <div>
+                        <p className="text-slate-300 text-sm font-medium">
+                          Predicted Value (Next Period)
+                        </p>
+                        <p className="text-3xl font-bold text-purple-400 mt-1">
+                          {currentAnalytics.predictedValue.toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Charts */}
-                {chartData.length > 0 && (
+                {/* {chartData.length > 0 && (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
                       <h3 className="text-xl font-bold text-white mb-4">
@@ -738,7 +979,76 @@ export default function Dashboard() {
                       </ResponsiveContainer>
                     </div>
                   </div>
-                )}
+                )} */}
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <h3 className="text-xl font-bold text-white mb-4">
+                      Sensor Trend - {selectedSensorType}
+                    </h3>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart
+                        data={
+                          chartData.length > 0
+                            ? chartData
+                            : [{ time: "N/A", value: 0 }]
+                        }
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                        <XAxis dataKey="time" stroke="#94a3b8" />
+                        <YAxis stroke="#94a3b8" />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "#1e293b",
+                            border: "1px solid #475569",
+                          }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="value"
+                          stroke="#3b82f6"
+                          strokeWidth={2}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                    {chartData.length === 0 && (
+                      <p className="text-center text-slate-400 mt-4">
+                        No data available
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <h3 className="text-xl font-bold text-white mb-4">
+                      Sensor Distribution
+                    </h3>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart
+                        data={
+                          chartData.length > 0
+                            ? chartData
+                            : [{ time: "N/A", value: 0 }]
+                        }
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                        <XAxis dataKey="time" stroke="#94a3b8" />
+                        <YAxis stroke="#94a3b8" />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "#1e293b",
+                            border: "1px solid #475569",
+                          }}
+                        />
+                        <Bar dataKey="value" fill="#10b981" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                    {chartData.length === 0 && (
+                      <p className="text-center text-slate-400 mt-4">
+                        No data available
+                      </p>
+                    )}
+                  </div>
+                </div>
 
                 {/* Today's Analytics Table */}
                 {currentAnalytics && (
@@ -797,6 +1107,16 @@ export default function Dashboard() {
                               </td>
                             </tr>
                           )}
+                          <tr>
+                            <td className="px-4 py-3 text-slate-300">
+                              Processed At
+                            </td>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {new Date(
+                                currentAnalytics.processedAt
+                              ).toLocaleString()}
+                            </td>
+                          </tr>
                         </tbody>
                       </table>
                     </div>
@@ -929,6 +1249,10 @@ export default function Dashboard() {
                   <p className="text-slate-400 text-sm mb-2">
                     📍 {device.location}
                   </p>
+                  <p className="text-slate-400 text-sm mb-2">
+                    ID:{" "}
+                    <span className="text-slate-300">{device.deviceId}</span>
+                  </p>
                   <p className="text-slate-400 text-sm mb-4">
                     Status:{" "}
                     <span
@@ -941,6 +1265,12 @@ export default function Dashboard() {
                       {device.status}
                     </span>
                   </p>
+                  {device.registeredAt && (
+                    <p className="text-slate-500 text-xs mb-4">
+                      Registered:{" "}
+                      {new Date(device.registeredAt).toLocaleDateString()}
+                    </p>
+                  )}
                   {isEditor && (
                     <div className="flex gap-2">
                       <button
@@ -1066,32 +1396,21 @@ export default function Dashboard() {
         {/* Alerts Tab */}
         {tab === "alerts" && (
           <div className="space-y-6">
-            <div className="bg-slate-800 p-4 rounded-lg border border-slate-700">
-              <label className="block text-slate-300 mb-2 font-medium">
-                Filter by Device
-              </label>
-              <select
-                value={alertFilterDevice}
-                onChange={(e) => setAlertFilterDevice(e.target.value)}
-                className="w-full md:w-1/2 px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
-              >
-                <option value="all">All Devices</option>
-                {devices.map((device) => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {device.name} ({device.deviceId})
-                  </option>
-                ))}
-              </select>
+            <div className="bg-blue-900/20 border border-blue-700 p-4 rounded-lg">
+              <p className="text-blue-300 text-sm">
+                📌 Showing alerts from the last 8 hours (real-time updates via
+                SSE)
+              </p>
             </div>
 
             <div className="space-y-4">
-              {filteredAlerts.length === 0 ? (
+              {alerts.length === 0 ? (
                 <div className="text-center py-12 text-slate-400 bg-slate-800 rounded-lg border border-slate-700">
                   <AlertCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
                   <p>No alerts at the moment</p>
                 </div>
               ) : (
-                filteredAlerts.map((alert, idx) => (
+                alerts.map((alert, idx) => (
                   <div
                     key={idx}
                     className={`p-4 rounded-lg border flex items-start gap-4 ${
@@ -1146,6 +1465,102 @@ export default function Dashboard() {
                   </div>
                 ))
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Events Tab */}
+        {tab === "events" && (
+          <div className="space-y-6">
+            <div className="bg-blue-900/20 border border-blue-700 p-4 rounded-lg">
+              <p className="text-blue-300 text-sm">
+                📌 Showing device events from the last 7 days (real-time updates
+                via SSE)
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              {deviceEvents.length === 0 ? (
+                <div className="text-center py-12 text-slate-400 bg-slate-800 rounded-lg border border-slate-700">
+                  <Activity className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No device events recorded</p>
+                </div>
+              ) : (
+                deviceEvents.map((event, idx) => (
+                  <div
+                    key={idx}
+                    className="p-4 rounded-lg border bg-slate-800 border-slate-700 hover:border-slate-600 transition"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="px-2 py-1 bg-blue-600 text-white text-xs rounded">
+                            {event.eventType}
+                          </span>
+                          <span className="text-slate-400 text-sm">
+                            {event.deviceId}
+                          </span>
+                        </div>
+                        <p className="text-white">{event.description}</p>
+                        <p className="text-slate-500 text-xs mt-2">
+                          {new Date(event.eventTime).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Settings Tab */}
+        {tab === "settings" && isEditor && (
+          <div className="space-y-6">
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <h3 className="text-xl font-bold text-white mb-4">
+                Sensor Thresholds
+              </h3>
+              <div className="space-y-4">
+                {thresholds.length === 0 ? (
+                  <p className="text-slate-400 text-center py-8">
+                    No thresholds configured
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-slate-700">
+                        <tr>
+                          <th className="px-4 py-3 text-slate-300">
+                            Sensor Type
+                          </th>
+                          <th className="px-4 py-3 text-slate-300">
+                            Min Value
+                          </th>
+                          <th className="px-4 py-3 text-slate-300">
+                            Max Value
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-700">
+                        {thresholds.map((threshold) => (
+                          <tr key={threshold.sensorType}>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {threshold.sensorType}
+                            </td>
+                            <td className="px-4 py-3 text-slate-300">
+                              {threshold.minValue}
+                            </td>
+                            <td className="px-4 py-3 text-slate-300">
+                              {threshold.maxValue}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
