@@ -1,0 +1,2500 @@
+import React, { useState, useEffect, useRef } from "react";
+import {
+  Plus,
+  Trash2,
+  Edit2,
+  Activity,
+  AlertCircle,
+  LogOut,
+  User,
+  Wifi,
+  WifiOff,
+  X,
+  Check,
+  Settings,
+  TrendingUp,
+  Filter,
+} from "lucide-react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+} from "recharts";
+import axios from "axios";
+
+// Axios Configuration
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL || "http://192.168.137.1:5000/api";
+
+const axiosInstance = axios.create({
+  baseURL: API_BASE,
+  withCredentials: true,
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
+
+// Request Interceptor
+axiosInstance.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem("accessToken");
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// Response Interceptor
+axiosInstance.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+
+      try {
+        const refreshToken = localStorage.getItem("refreshToken");
+        const accessToken = localStorage.getItem("accessToken");
+
+        if (!refreshToken || !accessToken) {
+          throw new Error("No tokens available");
+        }
+
+        const response = await axios.post(`${API_BASE}/auth/refresh`, {
+          refreshToken,
+          accessToken,
+        });
+
+        const { accessToken: newAccessToken, refreshToken: newRefreshToken } =
+          response.data;
+
+        localStorage.setItem("accessToken", newAccessToken);
+        localStorage.setItem("refreshToken", newRefreshToken);
+
+        originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+        return axiosInstance(originalRequest);
+      } catch (refreshError) {
+        localStorage.clear();
+        window.location.href = "/";
+        return Promise.reject(refreshError);
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
+
+// Types
+interface Device {
+  deviceId: string;
+  name: string;
+  location: string;
+  status: string;
+  type: string;
+  registeredAt?: string;
+}
+
+interface SensorData {
+  deviceId: string;
+  sensorType: string;
+  value: number;
+  timestamp: string;
+}
+
+interface Alert {
+  deviceId: string;
+  timestamp: string;
+  sensorType: string;
+  message: string;
+  severity: string;
+  value: number;
+}
+
+interface Analytics {
+  deviceId: string;
+  analysisDate: string;
+  sensorType: string;
+  avgValue: number;
+  dataPoints: number;
+  maxValue: number;
+  minValue: number;
+  predictedValue?: number;
+  processedAt: string;
+}
+
+interface User {
+  username: string;
+  displayName: string;
+  role: string;
+}
+
+interface SensorThreshold {
+  sensorType: string;
+  minValue: number;
+  maxValue: number;
+}
+
+interface SensorForecastConfig {
+  sensorType: string;
+  hoursWindow: number;
+}
+
+interface DeviceEvent {
+  deviceId: string;
+  eventTime: string;
+  description: string;
+  eventType: string;
+}
+const formatToUTC7 = (timestamp: string) => {
+  const date = new Date(timestamp);
+  // Convert to UTC+7 (Vietnam time)
+  const utc7Time = new Date(date.getTime() + 7 * 60 * 60 * 1000);
+  return utc7Time.toLocaleString("vi-VN", {
+    timeZone: "Asia/Bangkok",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+};
+
+const formatTimeOnlyUTC7 = (timestamp: string) => {
+  const date = new Date(timestamp);
+  const utc7Time = new Date(date.getTime() + 7 * 60 * 60 * 1000);
+  return utc7Time.toLocaleTimeString("vi-VN", {
+    timeZone: "Asia/Bangkok",
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
+// Login Component
+function LoginPage({ onLogin }: { onLogin: () => Promise<void> }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      const response = await axiosInstance.post("/auth/login", {
+        username,
+        password,
+      });
+
+      if (response.status === 200 && response.data) {
+        const { accessToken, refreshToken } = response.data;
+
+        localStorage.setItem("accessToken", accessToken);
+        localStorage.setItem("refreshToken", refreshToken);
+        localStorage.setItem("isAuthenticated", "true");
+
+        await onLogin();
+      } else {
+        setError("Unexpected response from server.");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        const msg =
+          err.response?.data?.message ||
+          (status === 404
+            ? "Invalid username or password"
+            : "Login failed, please try again.");
+        setError(msg);
+      } else {
+        setError("Unexpected error occurred.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
+      <div className="bg-slate-800 p-8 rounded-lg border border-slate-700 shadow-2xl w-full max-w-md">
+        <div className="flex items-center justify-center mb-8">
+          <Activity className="w-12 h-12 text-blue-400 mr-3" />
+          <h1 className="text-3xl font-bold text-white">IoT Dashboard</h1>
+        </div>
+        <form onSubmit={handleLogin} className="space-y-4">
+          <div>
+            <label className="block text-slate-300 mb-2">Username</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+              placeholder="Enter username"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-slate-300 mb-2">Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+              placeholder="Enter password"
+              required
+            />
+          </div>
+          {error && (
+            <div className="bg-red-900/20 border border-red-700 text-red-300 px-4 py-2 rounded">
+              {error}
+            </div>
+          )}
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded font-medium transition disabled:opacity-50"
+          >
+            {loading ? "Logging in..." : "Login"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// Main Dashboard
+export default function Dashboard() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
+  const [selectedSensorType, setSelectedSensorType] = useState<string>("");
+  const [sensorTypes, setSensorTypes] = useState<string[]>([]);
+  const [latestData, setLatestData] = useState<SensorData[]>([]);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [deviceEvents, setDeviceEvents] = useState<DeviceEvent[]>([]);
+  const [analytics, setAnalytics] = useState<Analytics[]>([]);
+  const [sensorHistory, setSensorHistory] = useState<SensorData[]>([]);
+  const [thresholds, setThresholds] = useState<SensorThreshold[]>([]);
+  const [tab, setTab] = useState<
+    "overview" | "devices" | "alerts" | "events" | "settings"
+  >("overview");
+
+  // Alerts Filter States
+  const [alertFilterDevice, setAlertFilterDevice] = useState<string>("");
+  const [alertStartTime, setAlertStartTime] = useState<string>("");
+  const [alertEndTime, setAlertEndTime] = useState<string>("");
+
+  // Events Filter States
+  const [eventFilterDevice, setEventFilterDevice] = useState<string>("all");
+  const [eventStartDate, setEventStartDate] = useState<string>("");
+  const [eventEndDate, setEventEndDate] = useState<string>("");
+
+  // Device States
+  const [showAddDevice, setShowAddDevice] = useState(false);
+  const [showEditDevice, setShowEditDevice] = useState(false);
+  const [editingDevice, setEditingDevice] = useState<Device | null>(null);
+  const [newDevice, setNewDevice] = useState({
+    deviceId: "",
+    name: "",
+    location: "",
+    type: "TemperatureSensor",
+    status: "Active",
+  });
+
+  // Threshold States
+  const [showAddThreshold, setShowAddThreshold] = useState(false);
+  const [showEditThreshold, setShowEditThreshold] = useState(false);
+  const [editingThreshold, setEditingThreshold] =
+    useState<SensorThreshold | null>(null);
+  const [newThreshold, setNewThreshold] = useState({
+    sensorType: "",
+    minValue: 0,
+    maxValue: 100,
+  });
+
+  const [forecastConfigs, setForecastConfigs] = useState<
+    SensorForecastConfig[]
+  >([]);
+  const [showAddForecastConfig, setShowAddForecastConfig] = useState(false);
+  const [showEditForecastConfig, setShowEditForecastConfig] = useState(false);
+  const [editingForecastConfig, setEditingForecastConfig] =
+    useState<SensorForecastConfig | null>(null);
+  const [newForecastConfig, setNewForecastConfig] = useState({
+    sensorType: "",
+    hoursWindow: 24,
+  });
+
+  // SSE Refs
+  const alertsSSERef = useRef<EventSource | null>(null);
+  const sensorSSERef = useRef<EventSource | null>(null);
+  const eventsSSERef = useRef<EventSource | null>(null);
+
+  // Initialize
+  useEffect(() => {
+    const auth = localStorage.getItem("isAuthenticated");
+    const token = localStorage.getItem("accessToken");
+
+    if (auth === "true" && token) {
+      setIsAuthenticated(true);
+      fetchUserProfile();
+    }
+  }, []);
+
+  // Fetch data after authentication
+  useEffect(() => {
+    if (isAuthenticated && user) {
+      fetchDevices();
+      fetchThresholds();
+      fetchForecastConfigs();
+    }
+  }, [isAuthenticated, user]);
+
+  // Initialize alerts and events when devices are loaded
+  useEffect(() => {
+    if (devices.length > 0) {
+      // Set first device as default for alerts
+      setAlertFilterDevice(devices[0].deviceId);
+      // Initialize alerts with 8 hours default
+      const now = new Date();
+      const eightHoursAgo = new Date(now.getTime() - 8 * 60 * 60 * 1000);
+      setAlertStartTime(eightHoursAgo.toISOString().slice(0, 16));
+      setAlertEndTime(now.toISOString().slice(0, 16));
+      fetchFilteredAlerts(
+        devices[0].deviceId,
+        eightHoursAgo.toISOString(),
+        now.toISOString()
+      );
+
+      // Initialize events (all devices, 7 days)
+      fetchFilteredEvents("all", null, null);
+    }
+  }, [devices]);
+
+  // Setup SSE connections
+  useEffect(() => {
+    if (isAuthenticated && user) {
+      setupAlertsSSE();
+      setupEventsSSE();
+
+      return () => {
+        closeSSEConnections();
+      };
+    }
+  }, [isAuthenticated, user]);
+
+  // Setup sensor SSE when device selected
+  useEffect(() => {
+    if (selectedDeviceId && isAuthenticated) {
+      setupSensorSSE();
+      fetchLatestData();
+    }
+
+    return () => {
+      if (sensorSSERef.current) {
+        sensorSSERef.current.close();
+        sensorSSERef.current = null;
+      }
+    };
+  }, [selectedDeviceId, isAuthenticated]);
+
+  // Fetch analytics and history
+  useEffect(() => {
+    if (selectedDeviceId && selectedSensorType) {
+      console.log(
+        "Fetching analytics and history for:",
+        selectedDeviceId,
+        selectedSensorType
+      );
+      fetchAnalytics();
+      fetchSensorHistory();
+    } else {
+      // Reset history khi không có selection
+      setSensorHistory([]);
+    }
+  }, [selectedDeviceId, selectedSensorType]);
+
+  const setupAlertsSSE = () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    if (alertsSSERef.current) {
+      alertsSSERef.current.close();
+    }
+
+    const eventSource = new EventSource(`${API_BASE}/alerts/sse`, {
+      withCredentials: true,
+    });
+
+    eventSource.onmessage = (event) => {
+      try {
+        const alert = JSON.parse(event.data);
+        setAlerts((prev) => [alert, ...prev].slice(0, 100));
+      } catch (err) {
+        console.error("Failed to parse alert SSE:", err);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("Alerts SSE error:", error);
+      eventSource.close();
+    };
+
+    alertsSSERef.current = eventSource;
+  };
+
+  const setupEventsSSE = () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    if (eventsSSERef.current) {
+      eventsSSERef.current.close();
+    }
+
+    const eventSource = new EventSource(`${API_BASE}/device-events/sse`, {
+      withCredentials: true,
+    });
+
+    eventSource.onmessage = (event) => {
+      try {
+        const deviceEvent = JSON.parse(event.data);
+        setDeviceEvents((prev) => [deviceEvent, ...prev].slice(0, 100));
+      } catch (err) {
+        console.error("Failed to parse event SSE:", err);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("Events SSE error:", error);
+      eventSource.close();
+    };
+
+    eventsSSERef.current = eventSource;
+  };
+
+  const setupSensorSSE = () => {
+    if (!selectedDeviceId) return;
+
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    if (sensorSSERef.current) {
+      sensorSSERef.current.close();
+    }
+
+    const eventSource = new EventSource(
+      `${API_BASE}/sensor-data/${selectedDeviceId}/sse`,
+      { withCredentials: true }
+    );
+
+    eventSource.onmessage = (event) => {
+      try {
+        const sensorData = JSON.parse(event.data);
+
+        console.log("Received SSE data:", sensorData); // Debug log
+
+        // Cập nhật latest data
+        setLatestData((prev) => {
+          const filtered = prev.filter(
+            (d) => d.sensorType !== sensorData.sensorType
+          );
+          return [...filtered, sensorData];
+        });
+
+        // Cập nhật sensor history nếu đúng sensor type
+        if (sensorData.sensorType === selectedSensorType) {
+          setSensorHistory((prev) => {
+            const updated = [...prev, sensorData];
+            console.log("Updated sensor history:", updated); // Debug log
+            return updated.slice(-100); // Giữ 100 data points gần nhất
+          });
+        }
+      } catch (err) {
+        console.error("Failed to parse sensor SSE:", err);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("Sensor SSE error:", error);
+      eventSource.close();
+    };
+
+    sensorSSERef.current = eventSource;
+  };
+
+  const closeSSEConnections = () => {
+    if (alertsSSERef.current) {
+      alertsSSERef.current.close();
+      alertsSSERef.current = null;
+    }
+    if (sensorSSERef.current) {
+      sensorSSERef.current.close();
+      sensorSSERef.current = null;
+    }
+    if (eventsSSERef.current) {
+      eventsSSERef.current.close();
+      eventsSSERef.current = null;
+    }
+  };
+
+  const fetchUserProfile = async () => {
+    try {
+      const res = await axiosInstance.get("/auth/profile");
+      setUser(res.data);
+      localStorage.setItem("user", JSON.stringify(res.data));
+    } catch (err) {
+      console.error("Failed to fetch profile:", err);
+      localStorage.clear();
+      setIsAuthenticated(false);
+    }
+  };
+
+  const fetchDevices = async () => {
+    try {
+      const res = await axiosInstance.get("/devices");
+      setDevices(res.data);
+      if (res.data.length > 0 && !selectedDeviceId) {
+        setSelectedDeviceId(res.data[0].deviceId);
+      }
+    } catch (err) {
+      console.error("Failed to fetch devices:", err);
+    }
+  };
+
+  const fetchLatestData = async () => {
+    if (!selectedDeviceId) return;
+    try {
+      const res = await axiosInstance.get(
+        `/sensor-data/${selectedDeviceId}/latest`
+      );
+      const dataArray = Array.isArray(res.data) ? res.data : [res.data];
+      setLatestData(dataArray);
+
+      const types = [
+        ...new Set(dataArray.map((d: SensorData) => d.sensorType)),
+      ];
+      setSensorTypes(types);
+      if (types.length > 0 && !selectedSensorType) {
+        setSelectedSensorType(types[0]);
+      }
+    } catch (err) {
+      console.error("Failed to fetch latest data:", err);
+    }
+  };
+
+  const fetchFilteredAlerts = async (
+    deviceId: string,
+    start: string,
+    end: string
+  ) => {
+    try {
+      const res = await axiosInstance.get(
+        `/alerts/${deviceId}?start=${start}&end=${end}`
+      );
+      setAlerts(res.data || []);
+    } catch (err) {
+      console.error("Failed to fetch alerts:", err);
+      setAlerts([]);
+    }
+  };
+
+  const fetchFilteredEvents = async (
+    deviceId: string,
+    start: string | null,
+    end: string | null
+  ) => {
+    try {
+      let url =
+        deviceId === "all" ? "/device-events" : `/device-events/${deviceId}`;
+
+      if (!start || !end) {
+        // Default: last 7 days
+        const now = new Date();
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        url += `?start=${sevenDaysAgo.toISOString()}&end=${now.toISOString()}`;
+      } else {
+        url += `?start=${start}&end=${end}`;
+      }
+
+      const res = await axiosInstance.get(url);
+      setDeviceEvents(res.data || []);
+    } catch (err) {
+      console.error("Failed to fetch events:", err);
+      setDeviceEvents([]);
+    }
+  };
+
+  const fetchAnalytics = async () => {
+    if (!selectedDeviceId) return;
+    try {
+      const today = new Date().toISOString().split("T")[0];
+      const res = await axiosInstance.get(
+        `/analytics/${selectedDeviceId}?date=${today}`
+      );
+      const data = Array.isArray(res.data) ? res.data : [res.data];
+      setAnalytics(data);
+    } catch (err) {
+      console.error("Failed to fetch analytics:", err);
+      setAnalytics([]);
+    }
+  };
+
+  const fetchSensorHistory = async () => {
+    if (!selectedDeviceId || !selectedSensorType) return;
+    try {
+      const res = await axiosInstance.get(`/sensor-data/${selectedDeviceId}`);
+
+      // API trả về { data: [...] } thay vì array trực tiếp
+      let data = res.data;
+
+      // Kiểm tra nếu response có property 'data'
+      if (data && data.data && Array.isArray(data.data)) {
+        data = data.data;
+      } else if (!Array.isArray(data)) {
+        data = [data];
+      }
+
+      console.log("My data", data);
+
+      // Lọc theo sensorType
+      const filtered = data.filter(
+        (s: SensorData) => s.sensorType === selectedSensorType
+      );
+
+      console.log("Fetched sensor history:", filtered); // Debug log
+      setSensorHistory(filtered);
+    } catch (err) {
+      console.error("Failed to fetch sensor history:", err);
+      setSensorHistory([]);
+    }
+  };
+  const fetchThresholds = async () => {
+    try {
+      const res = await axiosInstance.get("/sensor-thresholds");
+      setThresholds(res.data || []);
+    } catch (err) {
+      console.error("Failed to fetch thresholds:", err);
+    }
+  };
+
+  const fetchForecastConfigs = async () => {
+    try {
+      const res = await axiosInstance.get("/sensor-forecast-configs");
+      setForecastConfigs(res.data || []);
+    } catch (err) {
+      console.error("Failed to fetch forecast configs:", err);
+    }
+  };
+
+  const handleLoginSuccess = async () => {
+    setIsAuthenticated(true);
+    await fetchUserProfile();
+  };
+
+  const handleLogout = async () => {
+    try {
+      await axiosInstance.post("/auth/logout");
+    } catch (err) {
+      console.error("Logout error:", err);
+    } finally {
+      closeSSEConnections();
+      localStorage.clear();
+      setIsAuthenticated(false);
+      setUser(null);
+    }
+  };
+
+  const handleAddDevice = async () => {
+    if (!newDevice.deviceId || !newDevice.name || !newDevice.location) {
+      alert("Please fill all required fields");
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("deviceId", newDevice.deviceId);
+      formData.append("name", newDevice.name);
+      formData.append("location", newDevice.location);
+      formData.append("type", newDevice.type);
+      formData.append("status", newDevice.status);
+
+      const response = await axiosInstance.post("/devices", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+
+      if (response.status === 204) {
+        fetchDevices();
+        setNewDevice({
+          deviceId: "",
+          name: "",
+          location: "",
+          type: "TemperatureSensor",
+          status: "Active",
+        });
+        setShowAddDevice(false);
+        alert("Device added successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 409) {
+          alert("Device ID already exists!");
+        } else if (status === 403) {
+          alert("You do not have permission to add devices!");
+        } else {
+          alert("Failed to add device!");
+        }
+      }
+    }
+  };
+
+  const handleUpdateDevice = async () => {
+    if (!editingDevice) return;
+
+    try {
+      const formData = new FormData();
+      if (editingDevice.name) formData.append("name", editingDevice.name);
+      if (editingDevice.location)
+        formData.append("location", editingDevice.location);
+      if (editingDevice.status) formData.append("status", editingDevice.status);
+
+      const response = await axiosInstance.patch(
+        `/devices/${editingDevice.deviceId}`,
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+
+      if (response.status === 204) {
+        fetchDevices();
+        setShowEditDevice(false);
+        setEditingDevice(null);
+        alert("Device updated successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Device not found!");
+        } else if (status === 403) {
+          alert("You do not have permission to update devices!");
+        } else {
+          alert("Failed to update device!");
+        }
+      }
+    }
+  };
+
+  const handleDeleteDevice = async (deviceId: string) => {
+    if (!confirm("Are you sure you want to delete this device?")) return;
+
+    try {
+      const response = await axiosInstance.delete(`/devices/${deviceId}`);
+      if (response.status === 204) {
+        fetchDevices();
+        if (selectedDeviceId === deviceId) {
+          setSelectedDeviceId("");
+        }
+        alert("Device deleted successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Device not found!");
+        } else if (status === 403) {
+          alert("You do not have permission to delete devices!");
+        } else {
+          alert("Failed to delete device!");
+        }
+      }
+    }
+  };
+
+  // Threshold CRUD
+  const handleAddThreshold = async () => {
+    if (!newThreshold.sensorType) {
+      alert("Please enter sensor type");
+      return;
+    }
+    if (newThreshold.minValue >= newThreshold.maxValue) {
+      alert("Min value must be less than max value!");
+      return;
+    }
+
+    try {
+      const response = await axiosInstance.post(
+        "/sensor-thresholds",
+        newThreshold
+      );
+      if (response.status === 204) {
+        fetchThresholds();
+        setNewThreshold({ sensorType: "", minValue: 0, maxValue: 100 });
+        setShowAddThreshold(false);
+        alert("Threshold added successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 409) {
+          alert("Threshold for this sensor type already exists!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else if (status === 400) {
+          alert("Invalid threshold values!");
+        } else {
+          alert("Failed to add threshold!");
+        }
+      }
+    }
+  };
+
+  const handleUpdateThreshold = async () => {
+    if (!editingThreshold) return;
+    if (editingThreshold.minValue >= editingThreshold.maxValue) {
+      alert("Min value must be less than max value!");
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("minValue", editingThreshold.minValue.toString());
+      formData.append("maxValue", editingThreshold.maxValue.toString());
+
+      const response = await axiosInstance.patch(
+        `/sensor-thresholds/${editingThreshold.sensorType}`,
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+
+      if (response.status === 204) {
+        fetchThresholds();
+        setShowEditThreshold(false);
+        setEditingThreshold(null);
+        alert("Threshold updated successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Threshold not found!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else {
+          alert("Failed to update threshold!");
+        }
+      }
+    }
+  };
+
+  const handleDeleteThreshold = async (sensorType: string) => {
+    if (!confirm("Are you sure you want to delete this threshold?")) return;
+
+    try {
+      const response = await axiosInstance.delete(
+        `/sensor-thresholds/${sensorType}`
+      );
+      if (response.status === 204) {
+        fetchThresholds();
+        alert("Threshold deleted successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Threshold not found!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else {
+          alert("Failed to delete threshold!");
+        }
+      }
+    }
+  };
+
+  const handleAddForecastConfig = async () => {
+    if (!newForecastConfig.sensorType) {
+      alert("Please enter sensor type");
+      return;
+    }
+    if (newForecastConfig.hoursWindow <= 0) {
+      alert("Hours window must be greater than 0!");
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("sensorType", newForecastConfig.sensorType);
+      formData.append("hoursWindow", newForecastConfig.hoursWindow.toString());
+
+      const response = await axiosInstance.post(
+        "/sensor-forecast-configs",
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+      if (response.status === 204) {
+        fetchForecastConfigs();
+        setNewForecastConfig({ sensorType: "", hoursWindow: 24 });
+        setShowAddForecastConfig(false);
+        alert("Forecast config added successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 409) {
+          alert("Forecast config for this sensor type already exists!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else if (status === 400) {
+          alert("Invalid forecast config values!");
+        } else {
+          alert("Failed to add forecast config!");
+        }
+      }
+    }
+  };
+
+  const handleUpdateForecastConfig = async () => {
+    if (!editingForecastConfig) return;
+    if (editingForecastConfig.hoursWindow <= 0) {
+      alert("Hours window must be greater than 0!");
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append(
+        "hoursWindow",
+        editingForecastConfig.hoursWindow.toString()
+      );
+
+      const response = await axiosInstance.patch(
+        `/sensor-forecast-configs/${editingForecastConfig.sensorType}`,
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+
+      if (response.status === 204) {
+        fetchForecastConfigs();
+        setShowEditForecastConfig(false);
+        setEditingForecastConfig(null);
+        alert("Forecast config updated successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Forecast config not found!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else {
+          alert("Failed to update forecast config!");
+        }
+      }
+    }
+  };
+
+  const handleDeleteForecastConfig = async (sensorType: string) => {
+    if (!confirm("Are you sure you want to delete this forecast config?"))
+      return;
+
+    try {
+      const response = await axiosInstance.delete(
+        `/sensor-forecast-configs/${sensorType}`
+      );
+      if (response.status === 204) {
+        fetchForecastConfigs();
+        alert("Forecast config deleted successfully!");
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404) {
+          alert("Forecast config not found!");
+        } else if (status === 403) {
+          alert("You do not have permission!");
+        } else {
+          alert("Failed to delete forecast config!");
+        }
+      }
+    }
+  };
+
+  const handleAlertFilter = () => {
+    if (!alertStartTime || !alertEndTime) {
+      alert("Please select both start and end time");
+      return;
+    }
+
+    const start = new Date(alertStartTime);
+    const end = new Date(alertEndTime);
+    const now = new Date();
+    const eightHoursAgo = new Date(now.getTime() - 8 * 60 * 60 * 1000);
+
+    if (start < eightHoursAgo) {
+      alert("Start time cannot be more than 8 hours ago!");
+      return;
+    }
+
+    if (end > now) {
+      alert("End time cannot be in the future!");
+      return;
+    }
+
+    if (start >= end) {
+      alert("Start time must be before end time!");
+      return;
+    }
+
+    fetchFilteredAlerts(
+      alertFilterDevice,
+      start.toISOString(),
+      end.toISOString()
+    );
+  };
+
+  const handleEventFilter = () => {
+    if (!eventStartDate || !eventEndDate) {
+      alert("Please select both start and end date");
+      return;
+    }
+
+    const start = new Date(eventStartDate);
+    const end = new Date(eventEndDate);
+    const now = new Date();
+    const thirtyOneDaysAgo = new Date(now.getTime() - 31 * 24 * 60 * 60 * 1000);
+
+    if (start < thirtyOneDaysAgo) {
+      alert("Start date cannot be more than 31 days ago!");
+      return;
+    }
+
+    if (end > now) {
+      alert("End date cannot be in the future!");
+      return;
+    }
+
+    if (start >= end) {
+      alert("Start date must be before end date!");
+      return;
+    }
+
+    fetchFilteredEvents(
+      eventFilterDevice,
+      start.toISOString(),
+      end.toISOString()
+    );
+  };
+
+  const formatSensorValue = (value: number, sensorType: string) => {
+    // Nếu giá trị rất nhỏ (< 0.01), hiển thị 6 chữ số thập phân
+    if (Math.abs(value) < 0.01 && value !== 0) {
+      return value.toFixed(6);
+    }
+    // Nếu giá trị < 1, hiển thị 4 chữ số thập phân
+    if (Math.abs(value) < 1 && value !== 0) {
+      return value.toFixed(4);
+    }
+    // Ngược lại hiển thị 2 chữ số thập phân
+    return value.toFixed(2);
+  };
+
+  const isEditor = user?.role === "Editor" || user?.role === "Admin";
+
+  const chartData = React.useMemo(() => {
+    console.log("Sensor history for chart:", sensorHistory); // Debug log
+    console.log("Selected sensor type:", selectedSensorType); // Debug log
+
+    if (!sensorHistory || sensorHistory.length === 0) {
+      console.log("No sensor history data"); // Debug log
+      return [];
+    }
+
+    // Lấy 24 data points gần nhất
+    const recentData = sensorHistory.slice(-24);
+
+    const mapped = recentData.map((s) => ({
+      time: formatTimeOnlyUTC7(s.timestamp),
+      value: parseFloat(s.value.toString()), // Đảm bảo value là number
+    }));
+
+    console.log("Chart data mapped:", mapped); // Debug log
+    return mapped;
+  }, [sensorHistory, selectedSensorType]);
+
+  const currentAnalytics = analytics.find(
+    (a) => a.sensorType === selectedSensorType
+  );
+  const currentLatestData = latestData.find(
+    (d) => d.sensorType === selectedSensorType
+  );
+  const currentThreshold = thresholds.find(
+    (t) => t.sensorType === selectedSensorType
+  );
+
+  if (!isAuthenticated) {
+    return <LoginPage onLogin={handleLoginSuccess} />;
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
+      {/* Header */}
+      <div className="bg-slate-800 border-b border-slate-700 shadow-lg">
+        <div className="max-w-7xl mx-auto px-4 py-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-white flex items-center gap-2">
+                <Activity className="w-8 h-8 text-blue-400" />
+                IoT Dashboard
+              </h1>
+              <p className="text-slate-400 mt-1">
+                Real-time Device & Sensor Management
+              </p>
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2 text-slate-300">
+                <User className="w-5 h-5" />
+                <span>{user?.displayName || user?.username}</span>
+                <span className="px-2 py-1 bg-blue-600 text-white text-xs rounded">
+                  {user?.role}
+                </span>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded transition"
+              >
+                <LogOut className="w-4 h-4" />
+                Logout
+              </button>
+            </div>
+          </div>
+          <div className="flex gap-2 mt-4">
+            <button
+              onClick={() => setTab("overview")}
+              className={`px-4 py-2 rounded transition ${
+                tab === "overview"
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+            >
+              Overview
+            </button>
+            <button
+              onClick={() => setTab("devices")}
+              className={`px-4 py-2 rounded transition ${
+                tab === "devices"
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+            >
+              Devices
+            </button>
+            <button
+              onClick={() => setTab("alerts")}
+              className={`px-4 py-2 rounded transition ${
+                tab === "alerts"
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+            >
+              Alerts
+              {alerts.length > 0 && (
+                <span className="ml-2 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full">
+                  {alerts.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setTab("events")}
+              className={`px-4 py-2 rounded transition ${
+                tab === "events"
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+            >
+              Events
+            </button>
+            {isEditor && (
+              <button
+                onClick={() => setTab("settings")}
+                className={`px-4 py-2 rounded transition ${
+                  tab === "settings"
+                    ? "bg-blue-600 text-white"
+                    : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                }`}
+              >
+                <Settings className="w-4 h-4 inline mr-1" />
+                Settings
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        {/* Overview Tab */}
+        {tab === "overview" && (
+          <div className="space-y-6">
+            {/* Device & Sensor Selection */}
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-slate-300 mb-2 font-medium">
+                    Select Device
+                  </label>
+                  <select
+                    value={selectedDeviceId}
+                    onChange={(e) => {
+                      setSelectedDeviceId(e.target.value);
+                      setSelectedSensorType("");
+                      setSensorTypes([]);
+                    }}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">-- Choose Device --</option>
+                    {devices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.name} - {device.deviceId}{" "}
+                        {/* THÊM deviceId VÀO ĐÂY */}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2 font-medium">
+                    Select Sensor Type
+                  </label>
+                  <select
+                    value={selectedSensorType}
+                    onChange={(e) => setSelectedSensorType(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                    disabled={!sensorTypes.length}
+                  >
+                    <option value="">-- Choose Sensor --</option>
+                    {sensorTypes.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {selectedDeviceId && selectedSensorType && (
+              <>
+                {/* Stats - Always show */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <p className="text-slate-400 text-sm font-medium">
+                      Current Value
+                    </p>
+                    <p className="text-3xl font-bold text-white mt-2">
+                      {currentLatestData
+                        ? formatSensorValue(
+                            currentLatestData.value,
+                            selectedSensorType
+                          )
+                        : "N/A"}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {currentLatestData
+                        ? formatToUTC7(currentLatestData.timestamp)
+                        : "No data"}
+                    </p>
+                  </div>
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <p className="text-slate-400 text-sm font-medium">
+                      Avg Value
+                    </p>
+                    <p className="text-3xl font-bold text-green-400 mt-2">
+                      {currentAnalytics
+                        ? formatSensorValue(
+                            currentAnalytics.avgValue,
+                            selectedSensorType
+                          )
+                        : "N/A"}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Today's average
+                    </p>
+                  </div>
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <p className="text-slate-400 text-sm font-medium">
+                      Max Value
+                    </p>
+                    <p className="text-3xl font-bold text-red-400 mt-2">
+                      {currentAnalytics
+                        ? formatSensorValue(
+                            currentAnalytics.maxValue,
+                            selectedSensorType
+                          )
+                        : "N/A"}
+                    </p>
+                    {currentThreshold && (
+                      <p className="text-xs text-slate-500 mt-1">
+                        Threshold: {currentThreshold.maxValue}
+                      </p>
+                    )}
+                  </div>
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <p className="text-slate-400 text-sm font-medium">
+                      Min Value
+                    </p>
+                    <p className="text-3xl font-bold text-blue-400 mt-2">
+                      {currentAnalytics
+                        ? formatSensorValue(
+                            currentAnalytics.minValue,
+                            selectedSensorType
+                          )
+                        : "N/A"}
+                    </p>
+                    {currentThreshold && (
+                      <p className="text-xs text-slate-500 mt-1">
+                        Threshold: {currentThreshold.minValue}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                {/* Predicted Value - Always show if available */}
+                {currentAnalytics?.predictedValue !== null &&
+                  currentAnalytics?.predictedValue !== undefined && (
+                    <div className="bg-gradient-to-r from-purple-900/20 to-blue-900/20 p-6 rounded-lg border border-purple-700">
+                      <div className="flex items-center gap-3">
+                        <TrendingUp className="w-8 h-8 text-purple-400" />
+                        <div>
+                          <p className="text-slate-300 text-sm font-medium">
+                            Predicted Value (Next Period)
+                          </p>
+                          <p className="text-3xl font-bold text-purple-400 mt-1">
+                            {formatSensorValue(
+                              currentAnalytics.predictedValue,
+                              selectedSensorType
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                {/* Charts - Always show */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Line Chart */}
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <h3 className="text-xl font-bold text-white mb-4">
+                      Sensor Trend - {selectedSensorType}
+                    </h3>
+                    {chartData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={300}>
+                        <LineChart data={chartData}>
+                          <CartesianGrid
+                            strokeDasharray="3 3"
+                            stroke="#475569"
+                          />
+                          <XAxis
+                            dataKey="time"
+                            stroke="#94a3b8"
+                            angle={-45}
+                            textAnchor="end"
+                            height={80}
+                          />
+                          <YAxis
+                            stroke="#94a3b8"
+                            tickFormatter={(value) => Number(value).toFixed(4)}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: "#1e293b",
+                              border: "1px solid #475569",
+                            }}
+                            formatter={(value: any) => [
+                              formatSensorValue(
+                                parseFloat(value),
+                                selectedSensorType
+                              ),
+                              "Value",
+                            ]}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="value"
+                            stroke="#3b82f6"
+                            strokeWidth={2}
+                            dot={{ fill: "#3b82f6", r: 3 }}
+                            activeDot={{ r: 5 }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-[300px] flex items-center justify-center">
+                        <div className="text-center text-slate-400">
+                          <Activity className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                          <p>Waiting for sensor data...</p>
+                          <p className="text-xs mt-1">
+                            Data will appear when received from device
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Bar Chart */}
+                  <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                    <h3 className="text-xl font-bold text-white mb-4">
+                      Sensor Distribution
+                    </h3>
+                    {chartData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={300}>
+                        <BarChart data={chartData}>
+                          <CartesianGrid
+                            strokeDasharray="3 3"
+                            stroke="#475569"
+                          />
+                          <XAxis
+                            dataKey="time"
+                            stroke="#94a3b8"
+                            angle={-45}
+                            textAnchor="end"
+                            height={80}
+                          />
+                          <YAxis
+                            stroke="#94a3b8"
+                            tickFormatter={(value) => Number(value).toFixed(4)}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: "#1e293b",
+                              border: "1px solid #475569",
+                            }}
+                            formatter={(value: any) => [
+                              formatSensorValue(
+                                parseFloat(value),
+                                selectedSensorType
+                              ),
+                              "Value",
+                            ]}
+                          />
+                          <Bar
+                            dataKey="value"
+                            fill="#10b981"
+                            radius={[4, 4, 0, 0]}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-[300px] flex items-center justify-center">
+                        <div className="text-center text-slate-400">
+                          <Activity className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                          <p>Waiting for sensor data...</p>
+                          <p className="text-xs mt-1">
+                            Data will appear when received from device
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Today's Analytics Table - Always show */}
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                  <h3 className="text-xl font-bold text-white mb-4">
+                    Today's Analytics - {selectedSensorType}
+                  </h3>
+                  {currentAnalytics ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead className="bg-slate-700">
+                          <tr>
+                            <th className="px-4 py-3 text-slate-300">Metric</th>
+                            <th className="px-4 py-3 text-slate-300">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-700">
+                          <tr>
+                            <td className="px-4 py-3 text-slate-300">
+                              Average
+                            </td>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {formatSensorValue(
+                                currentAnalytics.avgValue,
+                                selectedSensorType
+                              )}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="px-4 py-3 text-slate-300">
+                              Maximum
+                            </td>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {formatSensorValue(
+                                currentAnalytics.maxValue,
+                                selectedSensorType
+                              )}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="px-4 py-3 text-slate-300">
+                              Minimum
+                            </td>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {formatSensorValue(
+                                currentAnalytics.minValue,
+                                selectedSensorType
+                              )}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="px-4 py-3 text-slate-300">
+                              Data Points
+                            </td>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {currentAnalytics.dataPoints}
+                            </td>
+                          </tr>
+                          {currentAnalytics.predictedValue !== null &&
+                            currentAnalytics.predictedValue !== undefined && (
+                              <tr>
+                                <td className="px-4 py-3 text-slate-300">
+                                  Predicted Value
+                                </td>
+                                <td className="px-4 py-3 text-white font-medium">
+                                  {formatSensorValue(
+                                    currentAnalytics.predictedValue,
+                                    selectedSensorType
+                                  )}
+                                </td>
+                              </tr>
+                            )}
+                          <tr>
+                            <td className="px-4 py-3 text-slate-300">
+                              Processed At
+                            </td>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {formatToUTC7(currentAnalytics.processedAt)}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-center text-slate-400 py-8">
+                      No analytics data available for today
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {(!selectedDeviceId || !selectedSensorType) && (
+              <div className="text-center py-12 text-slate-400 bg-slate-800 rounded-lg border border-slate-700">
+                <Activity className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                <p>Please select a device and sensor type to view data</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Devices Tab */}
+        {tab === "devices" && (
+          <div className="space-y-6">
+            {isEditor && (
+              <button
+                onClick={() => setShowAddDevice(!showAddDevice)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
+              >
+                <Plus className="w-5 h-5" />
+                Add Device
+              </button>
+            )}
+
+            {showAddDevice && (
+              <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                <h3 className="text-lg font-bold text-white mb-4">
+                  Register New Device
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  <input
+                    type="text"
+                    placeholder="Device ID"
+                    value={newDevice.deviceId}
+                    onChange={(e) =>
+                      setNewDevice({ ...newDevice, deviceId: e.target.value })
+                    }
+                    className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Device Name"
+                    value={newDevice.name}
+                    onChange={(e) =>
+                      setNewDevice({ ...newDevice, name: e.target.value })
+                    }
+                    className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Location"
+                    value={newDevice.location}
+                    onChange={(e) =>
+                      setNewDevice({ ...newDevice, location: e.target.value })
+                    }
+                    className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                  />
+                  <select
+                    value={newDevice.type}
+                    onChange={(e) =>
+                      setNewDevice({ ...newDevice, type: e.target.value })
+                    }
+                    className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option>TemperatureSensor</option>
+                    <option>HumiditySensor</option>
+                    <option>PressureSensor</option>
+                  </select>
+                  <select
+                    value={newDevice.status}
+                    onChange={(e) =>
+                      setNewDevice({ ...newDevice, status: e.target.value })
+                    }
+                    className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option>Active</option>
+                    <option>Inactive</option>
+                    <option>Offline</option>
+                    <option>Faulty</option>
+                    <option>Maintenance</option>
+                    <option>Decommissioned</option>
+                  </select>
+                </div>
+                <div className="flex gap-2 mt-4">
+                  <button
+                    onClick={handleAddDevice}
+                    className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                  >
+                    <Check className="w-4 h-4" />
+                    Add Device
+                  </button>
+                  <button
+                    onClick={() => setShowAddDevice(false)}
+                    className="bg-slate-600 hover:bg-slate-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                  >
+                    <X className="w-4 h-4" />
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {devices.map((device) => (
+                <div
+                  key={device.deviceId}
+                  className="p-6 rounded-lg border bg-slate-800 border-slate-700 hover:border-blue-500 transition"
+                >
+                  <div className="flex justify-between items-start mb-4">
+                    <div className="flex-1">
+                      <h3 className="text-lg font-bold text-white">
+                        {device.name}
+                      </h3>
+                      <p className="text-slate-400 text-sm">{device.type}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      {device.status === "Active" ? (
+                        <Wifi className="w-5 h-5 text-green-400" />
+                      ) : (
+                        <WifiOff className="w-5 h-5 text-red-400" />
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-slate-400 text-sm mb-2">
+                    📍 {device.location}
+                  </p>
+                  <p className="text-slate-400 text-sm mb-2">
+                    ID:{" "}
+                    <span className="text-slate-300">{device.deviceId}</span>
+                  </p>
+                  <p className="text-slate-400 text-sm mb-4">
+                    Status:{" "}
+                    <span
+                      className={
+                        device.status === "Active"
+                          ? "text-green-400"
+                          : "text-red-400"
+                      }
+                    >
+                      {device.status}
+                    </span>
+                  </p>
+                  {device.registeredAt && (
+                    <p className="text-slate-500 text-xs mb-4">
+                      Registered:{" "}
+                      {new Date(device.registeredAt).toLocaleDateString()}
+                    </p>
+                  )}
+                  {isEditor && (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setEditingDevice(device);
+                          setShowEditDevice(true);
+                        }}
+                        className="flex-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 px-3 py-2 rounded text-sm transition flex items-center justify-center gap-1"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDeleteDevice(device.deviceId)}
+                        className="flex-1 bg-red-600/20 hover:bg-red-600/40 text-red-300 px-3 py-2 rounded text-sm transition flex items-center justify-center gap-1"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Edit Device Modal */}
+            {showEditDevice && editingDevice && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700 max-w-md w-full">
+                  <h3 className="text-lg font-bold text-white mb-4">
+                    Edit Device
+                  </h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Device ID
+                      </label>
+                      <input
+                        type="text"
+                        value={editingDevice.deviceId}
+                        disabled
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-slate-500 cursor-not-allowed"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">Name</label>
+                      <input
+                        type="text"
+                        value={editingDevice.name}
+                        onChange={(e) =>
+                          setEditingDevice({
+                            ...editingDevice,
+                            name: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Location
+                      </label>
+                      <input
+                        type="text"
+                        value={editingDevice.location}
+                        onChange={(e) =>
+                          setEditingDevice({
+                            ...editingDevice,
+                            location: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Status
+                      </label>
+                      <select
+                        value={editingDevice.status}
+                        onChange={(e) =>
+                          setEditingDevice({
+                            ...editingDevice,
+                            status: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      >
+                        <option>Active</option>
+                        <option>Inactive</option>
+                        <option>Offline</option>
+                        <option>Faulty</option>
+                        <option>Maintenance</option>
+                        <option>Decommissioned</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-6">
+                    <button
+                      onClick={handleUpdateDevice}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Update
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowEditDevice(false);
+                        setEditingDevice(null);
+                      }}
+                      className="flex-1 bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Alerts Tab */}
+        {tab === "alerts" && (
+          <div className="space-y-6">
+            {/* Filters */}
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <div className="flex items-center gap-2 mb-4">
+                <Filter className="w-5 h-5 text-blue-400" />
+                <h3 className="text-lg font-bold text-white">Filter Alerts</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-slate-300 mb-2">Device</label>
+                  <select
+                    value={alertFilterDevice}
+                    onChange={(e) => setAlertFilterDevice(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  >
+                    {devices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">
+                    Start Time
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={alertStartTime}
+                    onChange={(e) => setAlertStartTime(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">
+                    End Time (Now)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={alertEndTime}
+                    onChange={(e) => setAlertEndTime(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={handleAlertFilter}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded transition"
+                  >
+                    Apply Filter
+                  </button>
+                </div>
+              </div>
+              <p className="text-slate-400 text-sm mt-3">
+                📌 Maximum range: 8 hours from now
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              {alerts.length === 0 ? (
+                <div className="text-center py-12 text-slate-400 bg-slate-800 rounded-lg border border-slate-700">
+                  <AlertCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No alerts for the selected period</p>
+                </div>
+              ) : (
+                alerts.map((alert, idx) => (
+                  <div
+                    key={idx}
+                    className={`p-4 rounded-lg border flex items-start gap-4 ${
+                      alert.severity === "High" || alert.severity === "high"
+                        ? "bg-red-900/20 border-red-700"
+                        : alert.severity === "Medium" ||
+                          alert.severity === "medium"
+                        ? "bg-orange-900/20 border-orange-700"
+                        : "bg-yellow-900/20 border-yellow-700"
+                    }`}
+                  >
+                    <AlertCircle
+                      className={`w-6 h-6 mt-1 flex-shrink-0 ${
+                        alert.severity === "High" || alert.severity === "high"
+                          ? "text-red-400"
+                          : alert.severity === "Medium" ||
+                            alert.severity === "medium"
+                          ? "text-orange-400"
+                          : "text-yellow-400"
+                      }`}
+                    />
+                    <div className="flex-1">
+                      <p className="text-white font-medium">{alert.message}</p>
+                      <p className="text-slate-400 text-sm mt-1">
+                        Device:{" "}
+                        <span className="text-slate-300">{alert.deviceId}</span>{" "}
+                        | Sensor:{" "}
+                        <span className="text-slate-300">
+                          {alert.sensorType}
+                        </span>{" "}
+                        | Value:{" "}
+                        <span className="text-slate-300">
+                          {alert.value.toFixed(2)}
+                        </span>
+                      </p>
+                      <p className="text-slate-500 text-xs mt-1">
+                        {new Date(alert.timestamp).toLocaleString()}
+                      </p>
+                    </div>
+                    <span
+                      className={`px-3 py-1 rounded-full text-xs font-medium ${
+                        alert.severity === "High" || alert.severity === "high"
+                          ? "bg-red-600 text-white"
+                          : alert.severity === "Medium" ||
+                            alert.severity === "medium"
+                          ? "bg-orange-600 text-white"
+                          : "bg-yellow-600 text-white"
+                      }`}
+                    >
+                      {alert.severity.toUpperCase()}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Events Tab */}
+        {tab === "events" && (
+          <div className="space-y-6">
+            {/* Filters */}
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <div className="flex items-center gap-2 mb-4">
+                <Filter className="w-5 h-5 text-blue-400" />
+                <h3 className="text-lg font-bold text-white">Filter Events</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-slate-300 mb-2">Device</label>
+                  <select
+                    value={eventFilterDevice}
+                    onChange={(e) => setEventFilterDevice(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="all">All Devices</option>
+                    {devices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">
+                    Start Date
+                  </label>
+                  <input
+                    type="date"
+                    value={eventStartDate}
+                    onChange={(e) => setEventStartDate(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-2">End Date</label>
+                  <input
+                    type="date"
+                    value={eventEndDate}
+                    onChange={(e) => setEventEndDate(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={handleEventFilter}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded transition"
+                  >
+                    Apply Filter
+                  </button>
+                </div>
+              </div>
+              <p className="text-slate-400 text-sm mt-3">
+                📌 Maximum range: 31 days ago to now
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              {deviceEvents.length === 0 ? (
+                <div className="text-center py-12 text-slate-400 bg-slate-800 rounded-lg border border-slate-700">
+                  <Activity className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No device events recorded</p>
+                </div>
+              ) : (
+                deviceEvents.map((event, idx) => (
+                  <div
+                    key={idx}
+                    className="p-4 rounded-lg border bg-slate-800 border-slate-700 hover:border-slate-600 transition"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="px-2 py-1 bg-blue-600 text-white text-xs rounded">
+                            {event.eventType}
+                          </span>
+                          <span className="text-slate-400 text-sm">
+                            {event.deviceId}
+                          </span>
+                        </div>
+                        <p className="text-white">{event.description}</p>
+                        <p className="text-slate-500 text-xs mt-2">
+                          {new Date(event.eventTime).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Settings Tab */}
+        {tab === "settings" && isEditor && (
+          <div className="space-y-6">
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-white">
+                  Sensor Thresholds
+                </h3>
+                <button
+                  onClick={() => setShowAddThreshold(!showAddThreshold)}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
+                >
+                  <Plus className="w-5 h-5" />
+                  Add Threshold
+                </button>
+              </div>
+
+              {showAddThreshold && (
+                <div className="mb-6 p-4 bg-slate-700/50 rounded-lg border border-slate-600">
+                  <h4 className="text-white font-medium mb-3">New Threshold</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <input
+                      type="text"
+                      placeholder="Sensor Type"
+                      value={newThreshold.sensorType}
+                      onChange={(e) =>
+                        setNewThreshold({
+                          ...newThreshold,
+                          sensorType: e.target.value,
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="Min Value"
+                      value={newThreshold.minValue}
+                      onChange={(e) =>
+                        setNewThreshold({
+                          ...newThreshold,
+                          minValue: parseFloat(e.target.value),
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="Max Value"
+                      value={newThreshold.maxValue}
+                      onChange={(e) =>
+                        setNewThreshold({
+                          ...newThreshold,
+                          maxValue: parseFloat(e.target.value),
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={handleAddThreshold}
+                      className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Add
+                    </button>
+                    <button
+                      onClick={() => setShowAddThreshold(false)}
+                      className="bg-slate-600 hover:bg-slate-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                    >
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                {thresholds.length === 0 ? (
+                  <p className="text-slate-400 text-center py-8">
+                    No thresholds configured
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-slate-700">
+                        <tr>
+                          <th className="px-4 py-3 text-slate-300">
+                            Sensor Type
+                          </th>
+                          <th className="px-4 py-3 text-slate-300">
+                            Min Value
+                          </th>
+                          <th className="px-4 py-3 text-slate-300">
+                            Max Value
+                          </th>
+                          <th className="px-4 py-3 text-slate-300">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-700">
+                        {thresholds.map((threshold) => (
+                          <tr key={threshold.sensorType}>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {threshold.sensorType}
+                            </td>
+                            <td className="px-4 py-3 text-slate-300">
+                              {threshold.minValue}
+                            </td>
+                            <td className="px-4 py-3 text-slate-300">
+                              {threshold.maxValue}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => {
+                                    setEditingThreshold(threshold);
+                                    setShowEditThreshold(true);
+                                  }}
+                                  className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 px-3 py-1 rounded text-sm transition flex items-center gap-1"
+                                >
+                                  <Edit2 className="w-3 h-3" />
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleDeleteThreshold(threshold.sensorType)
+                                  }
+                                  className="bg-red-600/20 hover:bg-red-600/40 text-red-300 px-3 py-1 rounded text-sm transition flex items-center gap-1"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Edit Threshold Modal */}
+            {showEditThreshold && editingThreshold && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700 max-w-md w-full">
+                  <h3 className="text-lg font-bold text-white mb-4">
+                    Edit Threshold
+                  </h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Sensor Type
+                      </label>
+                      <input
+                        type="text"
+                        value={editingThreshold.sensorType}
+                        disabled
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-slate-500 cursor-not-allowed"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Min Value
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editingThreshold.minValue}
+                        onChange={(e) =>
+                          setEditingThreshold({
+                            ...editingThreshold,
+                            minValue: parseFloat(e.target.value),
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Max Value
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editingThreshold.maxValue}
+                        onChange={(e) =>
+                          setEditingThreshold({
+                            ...editingThreshold,
+                            maxValue: parseFloat(e.target.value),
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-6">
+                    <button
+                      onClick={handleUpdateThreshold}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Update
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowEditThreshold(false);
+                        setEditingThreshold(null);
+                      }}
+                      className="flex-1 bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Forecast Configs Section */}
+            <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-white">
+                  Sensor Forecast Configurations
+                </h3>
+                <button
+                  onClick={() =>
+                    setShowAddForecastConfig(!showAddForecastConfig)
+                  }
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
+                >
+                  <Plus className="w-5 h-5" />
+                  Add Config
+                </button>
+              </div>
+
+              {showAddForecastConfig && (
+                <div className="mb-6 p-4 bg-slate-700/50 rounded-lg border border-slate-600">
+                  <h4 className="text-white font-medium mb-3">
+                    New Forecast Config
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <input
+                      type="text"
+                      placeholder="Sensor Type (e.g., temp, humidity)"
+                      value={newForecastConfig.sensorType}
+                      onChange={(e) =>
+                        setNewForecastConfig({
+                          ...newForecastConfig,
+                          sensorType: e.target.value,
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Hours Window"
+                      value={newForecastConfig.hoursWindow}
+                      onChange={(e) =>
+                        setNewForecastConfig({
+                          ...newForecastConfig,
+                          hoursWindow: parseInt(e.target.value),
+                        })
+                      }
+                      className="px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={handleAddForecastConfig}
+                      className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Add
+                    </button>
+                    <button
+                      onClick={() => setShowAddForecastConfig(false)}
+                      className="bg-slate-600 hover:bg-slate-700 text-white px-6 py-2 rounded transition flex items-center gap-2"
+                    >
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                {forecastConfigs.length === 0 ? (
+                  <p className="text-slate-400 text-center py-8">
+                    No forecast configurations
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-slate-700">
+                        <tr>
+                          <th className="px-4 py-3 text-slate-300">
+                            Sensor Type
+                          </th>
+                          <th className="px-4 py-3 text-slate-300">
+                            Hours Window
+                          </th>
+                          <th className="px-4 py-3 text-slate-300">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-700">
+                        {forecastConfigs.map((config) => (
+                          <tr key={config.sensorType}>
+                            <td className="px-4 py-3 text-white font-medium">
+                              {config.sensorType}
+                            </td>
+                            <td className="px-4 py-3 text-slate-300">
+                              {config.hoursWindow} hours
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => {
+                                    setEditingForecastConfig(config);
+                                    setShowEditForecastConfig(true);
+                                  }}
+                                  className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 px-3 py-1 rounded text-sm transition flex items-center gap-1"
+                                >
+                                  <Edit2 className="w-3 h-3" />
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleDeleteForecastConfig(
+                                      config.sensorType
+                                    )
+                                  }
+                                  className="bg-red-600/20 hover:bg-red-600/40 text-red-300 px-3 py-1 rounded text-sm transition flex items-center gap-1"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Edit Forecast Config Modal */}
+            {showEditForecastConfig && editingForecastConfig && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700 max-w-md w-full">
+                  <h3 className="text-lg font-bold text-white mb-4">
+                    Edit Forecast Config
+                  </h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Sensor Type
+                      </label>
+                      <input
+                        type="text"
+                        value={editingForecastConfig.sensorType}
+                        disabled
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-slate-500 cursor-not-allowed"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-2">
+                        Hours Window
+                      </label>
+                      <input
+                        type="number"
+                        value={editingForecastConfig.hoursWindow}
+                        onChange={(e) =>
+                          setEditingForecastConfig({
+                            ...editingForecastConfig,
+                            hoursWindow: parseInt(e.target.value),
+                          })
+                        }
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-6">
+                    <button
+                      onClick={handleUpdateForecastConfig}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Update
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowEditForecastConfig(false);
+                        setEditingForecastConfig(null);
+                      }}
+                      className="flex-1 bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded transition flex items-center justify-center gap-2"
+                    >
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
